@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
 from PIL import Image
@@ -18,9 +18,6 @@ genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-2.5-flash-image')  # Model untuk image gen/edit
 
 app = FastAPI()
-
-# Buat Application global (serverless ok, init di startup)
-application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 # Model untuk validate webhook data (opsional)
 class TelegramWebhook(BaseModel):
@@ -73,33 +70,35 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f'Error: {str(e)}')
 
-# Setup handlers di Application (ganti dispatcher)
-def setup_handlers(app: Application):
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('generate', generate_image))
-    app.add_handler(CommandHandler('edit', edit_image))
-    app.add_handler(MessageHandler(filters.PHOTO, edit_image))
-
-# Init application di startup FastAPI (jalan sekali di cold start)
-@app.on_event("startup")
-async def startup_event():
-    await application.initialize()  # Init bot, dll.
-    setup_handlers(application)     # Tambah handlers
-
-# Endpoint webhook
+# Endpoint webhook (init Application baru tiap request, cocok serverless)
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         webhook_data = await request.json()
-        bot = application.bot  # Ambil bot dari application
-        update = Update.de_json(webhook_data, bot)
-        await application.process_update(update)  # Proses update (ganti dispatcher)
+        
+        # Buat & init Application baru tiap request (stateless)
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        await application.initialize()
+        
+        # Tambah handlers
+        application.add_handler(CommandHandler('start', start))
+        application.add_handler(CommandHandler('generate', generate_image))
+        application.add_handler(CommandHandler('edit', edit_image))
+        application.add_handler(MessageHandler(filters.PHOTO, edit_image))
+        
+        # Proses update
+        update = Update.de_json(webhook_data, application.bot)
+        await application.process_update(update)
+        
+        # Shutdown optional, tapi bagus buat clean up
+        await application.shutdown()
+        
         return {"message": "ok"}
     except Exception as e:
-        print(f"Webhook error: {str(e)}")
-        return {"message": "error"}
+        print(f"Webhook error: {str(e)}")  # Log error
+        return {"message": "error"}  # Tapi return 200 biar Telegram nggak retry
 
-# Root untuk test
+# Root untuk test deploy
 @app.get("/")
 async def index():
     return {"message": "Bot deployed successfully!"}

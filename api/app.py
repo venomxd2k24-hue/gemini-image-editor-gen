@@ -5,12 +5,12 @@ from typing import Optional
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, Dispatcher
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
 from PIL import Image
 import base64
 
-# Env vars (diset di Vercel nanti)
+# Env vars (diset di Vercel)
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 
@@ -19,11 +19,16 @@ model = genai.GenerativeModel('gemini-2.5-flash-image')  # Model untuk image gen
 
 app = FastAPI()
 
+# Buat Application global (serverless ok, init di startup)
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+# Model untuk validate webhook data (opsional)
 class TelegramWebhook(BaseModel):
     update_id: int
     message: Optional[dict] = None
     edited_message: Optional[dict] = None
 
+# Fungsi handler (async)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Halo! Kirim /generate <prompt> untuk buat gambar, atau /edit <prompt> + kirim gambar.')
 
@@ -68,26 +73,33 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f'Error: {str(e)}')
 
-def setup_dispatcher(dispatcher: Dispatcher):
-    dispatcher.add_handler(CommandHandler('start', start))
-    dispatcher.add_handler(CommandHandler('generate', generate_image))
-    dispatcher.add_handler(CommandHandler('edit', edit_image))
-    dispatcher.add_handler(MessageHandler(filters.PHOTO, edit_image))
+# Setup handlers di Application (ganti dispatcher)
+def setup_handlers(app: Application):
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('generate', generate_image))
+    app.add_handler(CommandHandler('edit', edit_image))
+    app.add_handler(MessageHandler(filters.PHOTO, edit_image))
 
+# Init application di startup FastAPI (jalan sekali di cold start)
+@app.on_event("startup")
+async def startup_event():
+    await application.initialize()  # Init bot, dll.
+    setup_handlers(application)     # Tambah handlers
+
+# Endpoint webhook
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         webhook_data = await request.json()
-        bot = Bot(token=TELEGRAM_TOKEN)
+        bot = application.bot  # Ambil bot dari application
         update = Update.de_json(webhook_data, bot)
-        dispatcher = Dispatcher(bot, None, workers=0)
-        setup_dispatcher(dispatcher)
-        await dispatcher.process_update(update)
+        await application.process_update(update)  # Proses update (ganti dispatcher)
         return {"message": "ok"}
     except Exception as e:
         print(f"Webhook error: {str(e)}")
         return {"message": "error"}
 
+# Root untuk test
 @app.get("/")
 async def index():
     return {"message": "Bot deployed successfully!"}
